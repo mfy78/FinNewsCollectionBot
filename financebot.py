@@ -1,22 +1,20 @@
 # 福生无量天尊
 from openai import OpenAI
+import bleach
 import feedparser
-import requests
+import markdown
 from newspaper import Article
 from datetime import datetime
+from email.message import EmailMessage
+from pathlib import Path
+import smtplib
+import ssl
 import time
 import pytz
 import os
 
-# OpenAI API Key
-openai_api_key = os.getenv("OPENAI_API_KEY")
-# 从环境变量获取 Server酱 SendKeys
-server_chan_keys_env = os.getenv("SERVER_CHAN_KEYS")
-if not server_chan_keys_env:
-    raise ValueError("环境变量 SERVER_CHAN_KEYS 未设置，请在Github Actions中设置此变量！")
-server_chan_keys = server_chan_keys_env.split(",")
-
-openai_client = OpenAI(api_key=openai_api_key, base_url="https://api.deepseek.com/v1")
+SHANGHAI_TZ = pytz.timezone("Asia/Shanghai")
+REPORTS_DIR = Path(__file__).resolve().parent / "reports"
 
 # RSS源地址列表
 rss_feeds = {
@@ -47,8 +45,15 @@ rss_feeds = {
 }
 
 # 获取北京时间
-def today_date():
-    return datetime.now(pytz.timezone("Asia/Shanghai")).date()
+def now_in_shanghai():
+    return datetime.now(SHANGHAI_TZ)
+
+
+def required_env(name):
+    value = os.getenv(name)
+    if not value:
+        raise ValueError(f"环境变量 {name} 未设置")
+    return value
 
 # 爬取网页正文 (用于 AI 分析，但不展示)
 def fetch_article_text(url):
@@ -102,7 +107,7 @@ def fetch_rss_articles(rss_feeds, max_articles=10):
             print(f"✅ {source} RSS 获取成功，共 {len(feed.entries)} 条新闻")
 
             articles = []  # 每个source都需要重新初始化列表
-            for entry in feed.entries[:5]:
+            for entry in feed.entries[:max_articles]:
                 title = entry.get('title', '无标题')
                 link = entry.get('link', '') or entry.get('guid', '')
                 if not link:
@@ -124,8 +129,11 @@ def fetch_rss_articles(rss_feeds, max_articles=10):
     return news_data, analysis_text
 
 # AI 生成内容摘要（基于爬取的正文）
-def summarize(text):
-    completion = openai_client.chat.completions.create(
+def summarize(client, text):
+    if not text.strip():
+        raise ValueError("未抓取到可用的新闻正文，无法生成摘要")
+
+    completion = client.chat.completions.create(
         model="deepseek-chat",
         messages=[
             {"role": "system", "content": """
@@ -142,32 +150,125 @@ def summarize(text):
     )
     return completion.choices[0].message.content.strip()
 
-# 发送微信推送
-def send_to_wechat(title, content):
-    for key in server_chan_keys:
-        url = f"https://sctapi.ftqq.com/{key}.send"
-        data = {"title": title, "desp": content}
-        response = requests.post(url, data=data, timeout=10)
-        if response.ok:
-            print(f"✅ 推送成功: {key}")
-        else:
-            print(f"❌ 推送失败: {key}, 响应：{response.text}")
+
+def render_html(markdown_content, title):
+    rendered = markdown.markdown(
+        markdown_content,
+        extensions=["extra", "sane_lists"],
+        output_format="html5",
+    )
+    safe_html = bleach.clean(
+        rendered,
+        tags={
+            "a", "blockquote", "br", "code", "em", "h1", "h2", "h3",
+            "h4", "hr", "li", "ol", "p", "pre", "strong", "table",
+            "tbody", "td", "th", "thead", "tr", "ul",
+        },
+        attributes={"a": ["href", "title"]},
+        protocols={"http", "https", "mailto"},
+        strip=True,
+    )
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{title}</title>
+  <style>
+    body {{ margin: 0; background: #f3f4f6; color: #1f2937; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; line-height: 1.7; }}
+    main {{ width: min(760px, calc(100% - 32px)); margin: 24px auto; padding: 28px; box-sizing: border-box; background: #ffffff; border-top: 4px solid #0f766e; }}
+    h1 {{ margin: 0 0 20px; color: #111827; font-size: 26px; }}
+    h2 {{ margin-top: 30px; padding-bottom: 8px; border-bottom: 1px solid #d1d5db; color: #0f766e; font-size: 20px; }}
+    h3 {{ margin-top: 22px; color: #374151; font-size: 17px; }}
+    a {{ color: #0369a1; text-decoration: none; }}
+    li {{ margin: 8px 0; }}
+    blockquote {{ margin: 16px 0; padding: 8px 16px; border-left: 3px solid #b45309; color: #4b5563; background: #fffbeb; }}
+    pre, code {{ font-family: ui-monospace, SFMono-Regular, Menlo, monospace; background: #f3f4f6; }}
+    pre {{ padding: 12px; overflow-x: auto; }}
+    table {{ width: 100%; border-collapse: collapse; }}
+    th, td {{ padding: 8px; border: 1px solid #d1d5db; text-align: left; }}
+    @media (max-width: 600px) {{ main {{ width: 100%; margin: 0; padding: 20px 16px; }} h1 {{ font-size: 23px; }} }}
+  </style>
+</head>
+<body>
+  <main>
+    {safe_html}
+  </main>
+</body>
+</html>
+"""
+
+
+def save_report(markdown_content, html_content, run_time):
+    report_dir = REPORTS_DIR / run_time.strftime("%Y") / run_time.strftime("%m")
+    report_dir.mkdir(parents=True, exist_ok=True)
+    base_name = run_time.strftime("%Y-%m-%d-%H%M%S")
+    markdown_path = report_dir / f"{base_name}.md"
+    html_path = report_dir / f"{base_name}.html"
+    markdown_path.write_text(markdown_content, encoding="utf-8")
+    html_path.write_text(html_content, encoding="utf-8")
+    print(f"✅ Markdown 报告已保存: {markdown_path.relative_to(REPORTS_DIR.parent)}")
+    print(f"✅ HTML 报告已保存: {html_path.relative_to(REPORTS_DIR.parent)}")
+    return markdown_path, html_path
+
+
+def send_email(subject, html_content):
+    smtp_host = required_env("SMTP_HOST")
+    smtp_security = (os.getenv("SMTP_SECURITY") or "ssl").strip().lower()
+    default_port = 465 if smtp_security == "ssl" else 587
+    smtp_port = int(os.getenv("SMTP_PORT") or str(default_port))
+    smtp_username = required_env("SMTP_USERNAME")
+    smtp_password = required_env("SMTP_PASSWORD")
+    mail_from = (os.getenv("MAIL_FROM") or smtp_username).strip()
+    recipients = [item.strip() for item in required_env("MAIL_TO").split(",") if item.strip()]
+    if not recipients:
+        raise ValueError("环境变量 MAIL_TO 中没有有效的收件地址")
+
+    message = EmailMessage()
+    message["Subject"] = subject
+    message["From"] = mail_from
+    message["To"] = ", ".join(recipients)
+    message.set_content(html_content, subtype="html", charset="utf-8")
+
+    context = ssl.create_default_context()
+    if smtp_security == "ssl":
+        with smtplib.SMTP_SSL(smtp_host, smtp_port, context=context, timeout=30) as smtp:
+            smtp.login(smtp_username, smtp_password)
+            smtp.send_message(message)
+    elif smtp_security == "starttls":
+        with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as smtp:
+            smtp.ehlo()
+            smtp.starttls(context=context)
+            smtp.ehlo()
+            smtp.login(smtp_username, smtp_password)
+            smtp.send_message(message)
+    else:
+        raise ValueError("SMTP_SECURITY 仅支持 ssl 或 starttls")
+
+    print(f"✅ 邮件已发送至 {len(recipients)} 个收件地址")
 
 
 if __name__ == "__main__":
-    today_str = today_date().strftime("%Y-%m-%d")
+    run_time = now_in_shanghai()
+    report_time = run_time.strftime("%Y-%m-%d %H:%M")
+    email_subject = f"财经新闻摘要 | {report_time}"
+    openai_client = OpenAI(
+        api_key=required_env("OPENAI_API_KEY"),
+        base_url="https://api.deepseek.com/v1",
+    )
 
     # 每个网站获取最多 5 篇文章
     articles_data, analysis_text = fetch_rss_articles(rss_feeds, max_articles=5)
     
     # AI生成摘要
-    summary = summarize(analysis_text)
+    summary = summarize(openai_client, analysis_text)
 
-    # 生成仅展示标题和链接的最终消息
-    final_summary = f"📅 **{today_str} 财经新闻摘要**\n\n✍️ **今日分析总结：**\n{summary}\n\n---\n\n"
+    # 生成 Markdown 报告和可直接作为邮件正文的 HTML 页面
+    final_summary = f"# {report_time} 财经新闻摘要\n\n## 今日分析总结\n\n{summary}\n\n---\n\n"
     for category, content in articles_data.items():
         if content.strip():
             final_summary += f"## {category}\n{content}\n\n"
 
-    # 推送到多个server酱key
-    send_to_wechat(title=f"📌 {today_str} 财经新闻摘要", content=final_summary)
+    html_report = render_html(final_summary, email_subject)
+    save_report(final_summary, html_report, run_time)
+    send_email(email_subject, html_report)
