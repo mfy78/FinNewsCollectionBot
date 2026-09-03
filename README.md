@@ -69,7 +69,7 @@ FinNewsCollectionBot 是一款为券商分析师、基金经理、研究员等�
    | `SMTP_HOST` | SMTP 服务器，如 `smtp.qq.com` |
    | `SMTP_USERNAME` | 发件邮箱账号 |
    | `SMTP_PASSWORD` | 邮箱授权码或应用专用密码，不是普通登录密码 |
-   | `MAIL_TO` | 收件邮箱，多个地址用英文逗号分隔 |
+   | `MAIL_TO` | 收件邮箱；多个地址用英文逗号、分号或换行分隔 |
 
 3. 需要时可添加以下可选变量：
 
@@ -92,7 +92,13 @@ FinNewsCollectionBot 是一款为券商分析师、基金经理、研究员等�
 | Outlook.com | `smtp-mail.outlook.com` | `587` | `starttls` |
 | Microsoft 365 | `smtp.office365.com` | `587` | `starttls` |
 
-QQ 和 163 邮箱需要在邮箱设置中开启 SMTP 并生成授权码；Gmail 需要应用专用密码。请勿将密钥或授权码直接写入代码。
+例如，向三个邮箱发送同一封报告时，将 `MAIL_TO` 设置为：
+
+```text
+alice@example.com,bob@example.com,team@example.com
+```
+
+也支持用英文分号或换行分隔。QQ 和 163 邮箱需要在邮箱设置中开启 SMTP 并生成授权码；Gmail 需要应用专用密码。请勿将密钥或授权码直接写入代码。
 
 成功部署后，工作流会在北京时间每天 09:00 和 17:00 运行。GitHub Actions 定时任务可能存在数分钟延迟。
 

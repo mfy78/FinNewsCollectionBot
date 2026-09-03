@@ -6,6 +6,7 @@ import markdown
 from newspaper import Article
 from datetime import datetime
 from email.message import EmailMessage
+from email.utils import getaddresses
 from pathlib import Path
 import smtplib
 import ssl
@@ -212,6 +213,31 @@ def save_report(markdown_content, html_content, run_time):
     return markdown_path, html_path
 
 
+def parse_recipients(raw_recipients):
+    """Parse, validate, and de-duplicate one or more recipient addresses."""
+    normalized = raw_recipients.replace(";", ",").replace("\n", ",")
+    parsed = getaddresses([normalized])
+    recipients = []
+    invalid = []
+    for _, address in parsed:
+        address = address.strip()
+        if not address:
+            continue
+        if "@" not in address or address.startswith("@") or address.endswith("@"):
+            invalid.append(address)
+            continue
+        if address not in recipients:
+            recipients.append(address)
+
+    if invalid:
+        raise ValueError(
+            "环境变量 MAIL_TO 中存在无效邮箱地址: " + ", ".join(invalid)
+        )
+    if not recipients:
+        raise ValueError("环境变量 MAIL_TO 中没有有效的收件地址")
+    return recipients
+
+
 def send_email(subject, html_content):
     smtp_host = required_env("SMTP_HOST")
     smtp_security = (os.getenv("SMTP_SECURITY") or "ssl").strip().lower()
@@ -220,9 +246,7 @@ def send_email(subject, html_content):
     smtp_username = required_env("SMTP_USERNAME")
     smtp_password = required_env("SMTP_PASSWORD")
     mail_from = (os.getenv("MAIL_FROM") or smtp_username).strip()
-    recipients = [item.strip() for item in required_env("MAIL_TO").split(",") if item.strip()]
-    if not recipients:
-        raise ValueError("环境变量 MAIL_TO 中没有有效的收件地址")
+    recipients = parse_recipients(required_env("MAIL_TO"))
 
     message = EmailMessage()
     message["Subject"] = subject
