@@ -1,11 +1,7 @@
 name: 📧 RSS 财经新闻邮件推送
 
 on:
-  schedule:
-    - cron: '0 1 * * *'  # 北京时间 09:00
-    - cron: '0 9 * * *'  # 北京时间 17:00
-
-  workflow_dispatch:  # 允许手动触发
+  workflow_dispatch:  # 支持外部定时服务调用 API 和手动触发
 
 permissions:
   contents: write
@@ -32,6 +28,9 @@ jobs:
           pip install -U pip setuptools wheel
           pip install -r requirements.txt
 
+      - name: 🧪 验证新闻筛选与发送记录
+        run: python -m unittest -v test_news_sources
+
       - name: 🚀 运行脚本
         run: python financebot.py
         env:
@@ -43,6 +42,7 @@ jobs:
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           MAIL_FROM: ${{ secrets.MAIL_FROM }}
           MAIL_TO: ${{ secrets.MAIL_TO }}
+          ENABLE_BLS_RSS: ${{ vars.ENABLE_BLS_RSS }}
 
       - name: 🗂️ 持久化报告
         if: always()

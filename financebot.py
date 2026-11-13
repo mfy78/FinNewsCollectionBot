@@ -13,6 +13,11 @@ import ssl
 import time
 import pytz
 import os
+from news_sources import (
+    ARTICLE_TEXT_LIMIT, BLS_FEEDS, OFFICIAL_FEEDS, collect_source_articles,
+    entry_published_at, fetch_cninfo_announcements, fetch_official_feed, fetch_pdf_text,
+    load_sent_articles, save_sent_articles,
+)
 
 SHANGHAI_TZ = pytz.timezone("Asia/Shanghai")
 REPORTS_DIR = Path(__file__).resolve().parent / "reports"
@@ -43,7 +48,10 @@ rss_feeds = {
         "华尔街日报 - 经济":"https://feeds.content.dowjones.io/public/rss/socialeconomyfeed",
         "BBC全球经济": "http://feeds.bbci.co.uk/news/business/rss.xml",
     },
+    "🏛️ 官方经济发布": OFFICIAL_FEEDS,
 }
+if os.getenv("ENABLE_BLS_RSS", "false").lower() == "true":
+    rss_feeds["📊 美国劳工统计局"] = BLS_FEEDS
 
 # 获取北京时间
 def now_in_shanghai():
@@ -63,7 +71,7 @@ def fetch_article_text(url):
         article = Article(url)
         article.download()
         article.parse()
-        text = article.text[:1500]  # 限制长度，防止超出 API 输入限制
+        text = article.text[:ARTICLE_TEXT_LIMIT]
         if not text:
             print(f"⚠️ 文章内容为空: {url}")
         return text
@@ -93,41 +101,52 @@ def fetch_feed_with_retry(url, retries=3, delay=5):
     return None
 
 # 获取RSS内容（爬取正文但不展示）
-def fetch_rss_articles(rss_feeds, max_articles=10):
+def fetch_rss_articles(rss_feeds, max_articles=10, sent=None, run_time=None):
     news_data = {}
     analysis_text = ""  # 用于AI分析的正文内容
+    sent_links = set(sent or {})
+    previous_links = sent_links.copy()
+    run_time = run_time or now_in_shanghai()
 
     for category, sources in rss_feeds.items():
         category_content = ""
         for source, url in sources.items():
             print(f"📡 正在获取 {source} 的 RSS 源: {url}")
-            feed = fetch_feed_with_retry(url)
+            if url in OFFICIAL_FEEDS.values() or url in BLS_FEEDS.values():
+                feed = fetch_official_feed(url)
+            else:
+                feed = fetch_feed_with_retry(url)
             if not feed:
                 print(f"⚠️ 无法获取 {source} 的 RSS 数据")
                 continue
             print(f"✅ {source} RSS 获取成功，共 {len(feed.entries)} 条新闻")
 
-            articles = []  # 每个source都需要重新初始化列表
-            for entry in feed.entries[:max_articles]:
-                title = entry.get('title', '无标题')
-                link = entry.get('link', '') or entry.get('guid', '')
-                if not link:
-                    print(f"⚠️ {source} 的新闻 '{title}' 没有链接，跳过")
-                    continue
-
-                # 爬取正文用于分析（不展示）
-                article_text = fetch_article_text(link)
-                analysis_text += f"【{title}】\n{article_text}\n\n"
-
-                print(f"🔹 {source} - {title} 获取成功")
-                articles.append(f"- [{title}]({link})")
+            entries = [
+                {
+                    "title": entry.get("title", "无标题"),
+                    "link": entry.get("link", ""),
+                    "published_at": entry_published_at(entry),
+                }
+                for entry in feed.entries
+            ]
+            articles, source_text = collect_source_articles(
+                entries, source, sent_links, run_time, max_articles, fetch_article_text,
+            )
+            analysis_text += source_text
 
             if articles:
                 category_content += f"### {source}\n" + "\n".join(articles) + "\n\n"
 
         news_data[category] = category_content
 
-    return news_data, analysis_text
+    entries = fetch_cninfo_announcements(run_time)
+    articles, source_text = collect_source_articles(
+        entries, "巨潮资讯", sent_links, run_time, max_articles, fetch_pdf_text,
+    )
+    if articles:
+        news_data["📄 A 股公司公告"] = "### 巨潮资讯\n" + "\n".join(articles) + "\n\n"
+    analysis_text += source_text
+    return news_data, analysis_text, sent_links - previous_links
 
 # AI 生成内容摘要（基于爬取的正文）
 def summarize(client, text):
@@ -272,17 +291,22 @@ def send_email(subject, html_content):
     print(f"✅ 邮件已发送至 {len(recipients)} 个收件地址")
 
 
-if __name__ == "__main__":
+def main():
     run_time = now_in_shanghai()
     report_time = run_time.strftime("%Y-%m-%d %H:%M")
     email_subject = f"财经新闻摘要 | {report_time}"
+    sent = load_sent_articles()
+    # 每个网站获取最多 5 篇文章
+    articles_data, analysis_text, new_links = fetch_rss_articles(
+        rss_feeds, max_articles=5, sent=sent, run_time=run_time,
+    )
+    if not new_links:
+        print("最近 24 小时没有尚未发送的文章，本次无需发送邮件")
+        return
     openai_client = OpenAI(
         api_key=required_env("OPENAI_API_KEY"),
         base_url="https://api.deepseek.com/v1",
     )
-
-    # 每个网站获取最多 5 篇文章
-    articles_data, analysis_text = fetch_rss_articles(rss_feeds, max_articles=5)
     
     # AI生成摘要
     summary = summarize(openai_client, analysis_text)
@@ -296,3 +320,9 @@ if __name__ == "__main__":
     html_report = render_html(final_summary, email_subject)
     save_report(final_summary, html_report, run_time)
     send_email(email_subject, html_report)
+    # 邮件发送成功后才记录文章，失败时允许下次重新处理。
+    save_sent_articles(sent, new_links, run_time)
+
+
+if __name__ == "__main__":
+    main()
