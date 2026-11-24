@@ -111,10 +111,14 @@ def fetch_rss_articles(rss_feeds, max_articles=10, sent=None, run_time=None):
         category_content = ""
         for source, url in sources.items():
             print(f"📡 正在获取 {source} 的 RSS 源: {url}")
-            if url in OFFICIAL_FEEDS.values() or url in BLS_FEEDS.values():
-                feed = fetch_official_feed(url)
-            else:
-                feed = fetch_feed_with_retry(url)
+            try:
+                if url in OFFICIAL_FEEDS.values() or url in BLS_FEEDS.values():
+                    feed = fetch_official_feed(url)
+                else:
+                    feed = fetch_feed_with_retry(url)
+            except Exception as error:
+                print(f"⚠️ 跳过来源 {source}: {url}，错误: {error}")
+                continue
             if not feed:
                 print(f"⚠️ 无法获取 {source} 的 RSS 数据")
                 continue
@@ -138,7 +142,11 @@ def fetch_rss_articles(rss_feeds, max_articles=10, sent=None, run_time=None):
 
         news_data[category] = category_content
 
-    entries = fetch_cninfo_announcements(run_time)
+    try:
+        entries = fetch_cninfo_announcements(run_time)
+    except Exception as error:
+        print(f"⚠️ 跳过巨潮资讯，错误: {error}")
+        entries = []
     articles, source_text = collect_source_articles(
         entries, "巨潮资讯", sent_links, run_time, max_articles, fetch_pdf_text,
     )

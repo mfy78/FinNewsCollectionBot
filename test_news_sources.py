@@ -75,12 +75,41 @@ class NewsSourcesTests(unittest.TestCase):
 
     def test_body_failure_does_not_mark_article_sent(self):
         links = set()
-        with self.assertRaises(ValueError):
-            collect_source_articles(
-                [entry("https://example.com/a")], "来源", links, RUN_TIME, 5,
-                lambda url: "",
-            )
+        articles, text = collect_source_articles(
+            [entry("https://example.com/a")], "来源", links, RUN_TIME, 5,
+            lambda url: "",
+        )
+        self.assertEqual((articles, text), ([], ""))
         self.assertEqual(links, set())
+
+    def test_failed_article_does_not_block_next_article(self):
+        fetch = unittest.mock.Mock(side_effect=[requests.HTTPError("403"), "有效正文"])
+        links = set()
+        articles, text = collect_source_articles(
+            [entry("https://example.com/blocked"), entry("https://example.com/valid")],
+            "来源", links, RUN_TIME, 5, fetch,
+        )
+        self.assertEqual(len(articles), 1)
+        self.assertIn("有效正文", text)
+        self.assertEqual(links, {"https://example.com/valid"})
+
+    @patch("financebot.fetch_cninfo_announcements", side_effect=requests.Timeout("timeout"))
+    @patch("financebot.fetch_article_text", return_value="有效正文")
+    @patch("financebot.fetch_official_feed", side_effect=requests.HTTPError("403"))
+    @patch("financebot.fetch_feed_with_retry")
+    def test_failed_sources_preserve_other_articles(self, fetch, official, body, cninfo):
+        fetch.return_value = feedparser.FeedParserDict(entries=[{
+            "title": "有效新闻", "link": "https://example.com/valid",
+            "published_parsed": RUN_TIME.utctimetuple(),
+        }])
+        sources = {"分类": {
+            "官方来源": next(iter(financebot.OFFICIAL_FEEDS.values())),
+            "普通来源": "https://example.com/rss",
+        }}
+        data, text, links = financebot.fetch_rss_articles(sources, run_time=RUN_TIME)
+        self.assertIn("有效新闻", data["分类"])
+        self.assertIn("有效正文", text)
+        self.assertEqual(links, {"https://example.com/valid"})
 
     def test_state_persists_between_runs(self):
         directory = Path(".work/tests")

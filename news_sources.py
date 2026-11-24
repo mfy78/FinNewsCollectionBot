@@ -159,9 +159,14 @@ def collect_source_articles(entries, source, sent_links, run_time, max_articles,
     articles = []
     analysis_parts = []
     for entry in select_recent_articles(entries, sent_links, run_time, max_articles):
-        text = fetch_text(entry["link"])
+        try:
+            text = fetch_text(entry["link"])
+        except Exception as error:
+            print(f'⚠️ 跳过文章: {entry["link"]}，错误: {error}')
+            continue
         if not text or text == "（未能获取文章正文）":
-            raise ValueError(f'新闻正文获取失败: {entry["link"]}')
+            print(f'⚠️ 跳过正文为空的文章: {entry["link"]}')
+            continue
         published_at = entry["published_at"].astimezone(run_time.tzinfo)
         date_text = published_at.strftime("%Y-%m-%d %H:%M")
         articles.append(f'- [{entry["title"]}]({entry["link"]})（{date_text}）')
